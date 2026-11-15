@@ -1,0 +1,104 @@
+name: Android Build & Release
+
+on:
+  push:
+    branches: [main]
+    tags: ["v*.*.*"]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build-and-test:
+    name: Build, Test & Package Android APK
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up JDK 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+
+      - name: Set up Android SDK
+        uses: android-actions/setup-android@v3
+
+      - name: Set up Gradle 9.3.1
+        uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: "9.3.1"
+
+      - name: Run unit & Robolectric tests
+        run: gradle :app:testDebugUnitTest --no-daemon
+
+      - name: Check signing secrets availability
+        id: signing_check
+        env:
+          HAS_KEYSTORE: ${{ secrets.ANDROID_KEYSTORE_BASE64 != '' && secrets.STORE_PASSWORD != '' && secrets.KEY_PASSWORD != '' }}
+        run: echo "has_signing=${HAS_KEYSTORE}" >> "$GITHUB_OUTPUT"
+
+      - name: Decode release keystore & build signed Release APK + AAB
+        if: steps.signing_check.outputs.has_signing == 'true'
+        env:
+          ANDROID_KEYSTORE_BASE64: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
+          STORE_PASSWORD: ${{ secrets.STORE_PASSWORD }}
+          KEY_PASSWORD: ${{ secrets.KEY_PASSWORD }}
+        run: |
+          echo "$ANDROID_KEYSTORE_BASE64" | base64 --decode > "$RUNNER_TEMP/upload-keystore.jks"
+          export KEYSTORE_PATH="$RUNNER_TEMP/upload-keystore.jks"
+          gradle :app:assembleRelease :app:bundleRelease --no-daemon
+          rm -f "$RUNNER_TEMP/upload-keystore.jks"
+
+      - name: Build Debug APK (when release signing secrets are not set)
+        if: steps.signing_check.outputs.has_signing != 'true'
+        run: gradle :app:assembleDebug --no-daemon
+
+      - name: Package, validate APK & generate SHA256 checksum
+        id: package_apk
+        run: |
+          mkdir -p dist
+          VERSION_TAG="${GITHUB_REF_NAME:-1.0.0}"
+          VERSION_CLEAN="${VERSION_TAG#v}"
+          if [ -f app/build/outputs/apk/release/app-release.apk ]; then
+            SRC_APK="app/build/outputs/apk/release/app-release.apk"
+          else
+            SRC_APK="app/build/outputs/apk/debug/app-debug.apk"
+          fi
+          OUT_APK="dist/MansionMystery-v${VERSION_CLEAN}.apk"
+          cp "$SRC_APK" "$OUT_APK"
+          if [ ! -s "$OUT_APK" ]; then
+            echo "ERROR: Built APK is missing or empty!"
+            exit 1
+          fi
+          sha256sum "$OUT_APK" > dist/SHA256SUMS.txt
+          cat dist/SHA256SUMS.txt
+          echo "apk_path=$OUT_APK" >> "$GITHUB_OUTPUT"
+          echo "version_clean=$VERSION_CLEAN" >> "$GITHUB_OUTPUT"
+
+      - name: Upload APK & SHA256 artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: mansion-mystery-android-v${{ steps.package_apk.outputs.version_clean }}
+          path: |
+            dist/*.apk
+            dist/SHA256SUMS.txt
+            app/build/outputs/bundle/release/*.aab
+          if-no-files-found: warn
+
+      - name: Publish GitHub Release on version tag
+        if: startsWith(github.ref, 'refs/tags/v')
+        uses: softprops/action-gh-release@v2
+        with:
+          name: "${{ github.ref_name }} – Initial Android Release"
+          body_path: Documentation/RELEASE_NOTES_v1.0.0.md
+          files: |
+            dist/*.apk
+            dist/SHA256SUMS.txt
+          draft: false
+          prerelease: false
