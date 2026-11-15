@@ -1,0 +1,6 @@
+{
+  "name": "Mansion Mystery",
+  "description": "A Gothic Victorian 2D top-down detective stealth and puzzle adventure set in Ravenshollow Manor.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
